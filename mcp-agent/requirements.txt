@@ -4,3 +4,4 @@ langchain-mcp-adapters
 langchain-openai
 langgraph
 fastmcp
+streamlit
