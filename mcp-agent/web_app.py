@@ -73,7 +73,7 @@ if st.button("Analyze"):
     with st.spinner("Fetching data..."):
         stock_info, price_history, quarterly = asyncio.run(get_dashboard_data(symbol))
 
-        # If stock_info is a string, try to parse it as JSON
+        # Ensure stock_info is a dict (parse if string)
         if isinstance(stock_info, str):
             try:
                 stock_info = json.loads(stock_info)
@@ -94,58 +94,30 @@ if st.button("Analyze"):
                     num /= 1000.0
                 return '%.2f%s' % (num, ['', 'K', 'M', 'B', 'T', 'P'][magnitude])
 
-            # --- LLM-based Recommendation ---
-            # Fetch annual financials for richer context
-            annual, _, _ = asyncio.run(get_financials(symbol))
-            # Select only key fields for the prompt
-            key_info = {
-                "symbol": stock_info.get("symbol"),
-                "longName": stock_info.get("longName"),
-                "sector": stock_info.get("sector"),
-                "industry": stock_info.get("industry"),
-                "currentPrice": stock_info.get("currentPrice"),
-                "marketCap": stock_info.get("marketCap"),
-                "trailingPE": stock_info.get("trailingPE"),
-                "revenueGrowth": stock_info.get("revenueGrowth"),
-                "dividendYield": stock_info.get("dividendYield"),
-                "beta": stock_info.get("beta"),
-                "fiftyTwoWeekHigh": stock_info.get("fiftyTwoWeekHigh"),
-                "fiftyTwoWeekLow": stock_info.get("fiftyTwoWeekLow"),
-            }
-            # For annual, just send a few key metrics for the last 3 years
-            annual_summary = {}
-            for metric in ["Total Revenue", "Net Income"]:
-                if metric in annual:
-                    years = list(annual[metric].keys())[-3:]
-                    annual_summary[metric] = {str(k): annual[metric][k] for k in years}
-            # Shorten the prompt
-            prompt = f"""
-            You are a financial analyst. Given the following key stock information and annual financials, provide a one-word recommendation (Buy, Hold, or Sell) and a one-sentence reason.\n\nStock Info: {json.dumps(key_info)}\nAnnual Financials (last 3 years): {json.dumps(annual_summary)}\n\nFormat: <Recommendation> - <Reason>
-            """
-            try:
-                llm_response = model.invoke(prompt)
-                # Always extract the content field if present
-                rec_text = getattr(llm_response, 'content', None)
-                if not rec_text and isinstance(llm_response, dict):
-                    rec_text = llm_response.get('content')
-                if not rec_text:
-                    rec_text = str(llm_response)
-                # Now parse the recommendation and reason
-                import re
-                match = re.match(r'\s*(Buy|Sell|Hold)\s*[-:]?\s*(.*)', rec_text, re.IGNORECASE)
-                if match:
-                    rec = match.group(1).capitalize()
-                    reason = match.group(2).strip()
-                else:
-                    rec = rec_text.strip()
-                    reason = ''
-                icon = {'Buy': '🟢', 'Sell': '🔴', 'Hold': '🟡'}.get(rec, 'ℹ️')
-                rec_display = f"{icon} {rec.upper()}"
-            except Exception as e:
+            # --- MCP-based Recommendation ---
+            # Call the MCP tool for recommendation
+            async def fetch_recommendation(symbol):
+                async with stdio_client(server_params) as (read, write):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        tools_list = await load_mcp_tools(session)
+                        tools = {tool.name: tool for tool in tools_list}
+                        return await tools["get_recommendation"].ainvoke({"symbol": symbol})
+            rec_result = asyncio.run(fetch_recommendation(symbol))
+            if isinstance(rec_result, str):
+                try:
+                    rec_result = json.loads(rec_result)
+                except Exception:
+                    st.error(f"Error: Could not parse recommendation result. Received: {rec_result}")
+                    st.stop()
+            if rec_result and not rec_result.get("error"):
+                rec = rec_result.get("recommendation", "N/A")
+                icon = rec_result.get("icon", "ℹ️")
+                reason = rec_result.get("reason", "")
+            else:
                 rec = 'N/A'
                 icon = 'ℹ️'
-                rec_display = f"{icon} {rec}"
-                reason = f"Could not get LLM recommendation: {e}"
+                reason = rec_result.get("error", "Could not get recommendation.") if rec_result else "Could not get recommendation."
 
             # --- Top KPIs ---
             col_rec, col1, col2, col3, col4 = st.columns(5)
